@@ -35,7 +35,12 @@ MINUTES_RE = re.compile(r"через\s+(\d+)\s*хв", re.I)
 ENERGY_WORDS = ("недостатньо енергі", "не вистачає енергі")
 DEATH_WORDS = ("ви загинули", "ви померли", "ваша смерть", "моя смерть")
 WIN_WORDS = ("смерть ворога", "ви перемогли", "ворога переможено")
-BATTLE_WORDS = ("параметри ворога", "vs ⚔", "раунд ", "з'явився", "з’явився")
+BATTLE_WORDS = (
+    "параметри ворога", "vs ⚔", "раунд ", "з'явився", "з’явився",
+    # The game sometimes offers a special move during combat.
+    # The user wants to IGNORE it and keep pressing ordinary Attack.
+    "прийом", "прийоми",
+)
 
 
 def utc_now():
@@ -88,7 +93,8 @@ def read_state():
             return value
     except (OSError, ValueError):
         pass
-    return {"next_action_at": None, "reason": "", "last_hp": None}
+    return {"next_action_at": None, "reason": "", "last_hp": None,
+            "combat_active": False}
 
 
 def save_state(state):
@@ -217,11 +223,33 @@ async def main():
                 break
 
             status, hp = classify(latest.raw_text)
+            # Some combat prompts contain only a "Прийом" button rather than
+            # combat text; never press it or go back to exploring in that case.
+            current_buttons = [normalize(text) for text in keyboard_texts(latest)]
+            if status == "other" and any("прийом" in text for text in current_buttons):
+                status = "combat"
+
             # Ignore a stale pause-trigger message after its wait has finished.
             if latest.id == old_pause_message_id and status in ("death", "energy", "victory"):
                 LOG.info("Ignoring stale result after completed cooldown")
                 status = "other"
             old_pause_message_id = None
+
+            # Fight mode survives bot messages that only show a special move,
+            # a combat notification, or some other unrelated intermediate text.
+            # It also survives separate GitHub Actions runs via state.json.
+            if status == "combat":
+                if not state.get("combat_active", False):
+                    state["combat_active"] = True
+                    save_state(state)
+            elif status in ("victory", "death"):
+                if state.get("combat_active", False):
+                    state["combat_active"] = False
+                    save_state(state)
+            elif status == "other" and state.get("combat_active", False):
+                LOG.info("Ignoring intermediate prompt; continue ordinary Attack")
+                status = "combat"
+
             LOG.info("Action %s: %s, HP=%s, message=%s", index + 1, status, hp, latest.id)
 
             if status == "death":
