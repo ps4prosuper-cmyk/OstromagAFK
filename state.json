@@ -1,1 +1,7 @@
-{"next_action_at": null, "reason": "", "last_hp": null}
+{
+  "next_action_at": "2026-10-20T16:15:49.184381+00:00",
+  "reason": "low_hp",
+  "last_hp": 45,
+  "combat_active": false,
+  "pause_message_id": 291257
+}
