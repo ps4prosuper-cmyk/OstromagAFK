@@ -1,7 +1,7 @@
 {
-  "next_action_at": "2026-10-20T16:15:49.184381+00:00",
+  "next_action_at": "2026-10-20T19:40:16.622762+00:00",
   "reason": "low_hp",
-  "last_hp": 45,
+  "last_hp": 105,
   "combat_active": false,
-  "pause_message_id": 291257
+  "pause_message_id": 291295
 }
