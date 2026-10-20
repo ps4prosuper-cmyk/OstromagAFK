@@ -1,0 +1,15 @@
+
+# Telegram sessions
+*.session
+*.session-journal
+
+# Secret files
+.env
+.env.*
+*secret*
+telegram_qr_login.html
+
+# Python temporary files
+__pycache__/
+*.pyc
+.venv/
