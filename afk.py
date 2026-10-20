@@ -1,3 +1,163 @@
+"""Ostromag RPG AFK automation; scheduled, bounded Telethon execution.
+
+Designed for the reply keyboard visible in @ostromag_game_bot. No secrets
+are stored in this file. GitHub Actions provides credentials as environment variables.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import re
+import time
+import unicodedata
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError, RPCError
+from telethon.sessions import StringSession
+
+LOG = logging.getLogger("ostromag_afk")
+STATE_PATH = Path("state.json")
+MAX_ACTIONS = 18
+MAX_RUNTIME_SECONDS = 160
+ACTION_DELAY_SECONDS = 2
+RESPONSE_TIMEOUT_SECONDS = 18
+
+# These are REAL reply-keyboard texts from the screenshots. Their purpose is
+# only to replace a missing historic reply-keyboard message, never a callback.
+EXPLORE_FALLBACK = "🗺 Досліджувати (⚡ 1)"
+ATTACK_FALLBACK = "⚔️ Атака"
+
+HP_RE = re.compile(r"\bВи\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)", re.I)
+MINUTES_RE = re.compile(r"через\s+(\d+)\s*хв", re.I)
+ENERGY_WORDS = ("недостатньо енергі", "не вистачає енергі")
+DEATH_WORDS = ("ви загинули", "ви померли", "ваша смерть", "моя смерть")
+WIN_WORDS = ("смерть ворога", "ви перемогли", "ворога переможено")
+BATTLE_WORDS = ("параметри ворога", "vs ⚔", "раунд ", "з'явився", "з’явився")
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def normalize(value):
+    return unicodedata.normalize("NFKC", value or "").lower().strip()
+
+
+def get_hp(text):
+    found = HP_RE.search(text or "")
+    return (int(found.group(1)), int(found.group(2))) if found else None
+
+
+def get_energy_wait(text):
+    value = normalize(text)
+    if not any(word in value for word in ENERGY_WORDS):
+        return None
+    found = MINUTES_RE.search(value)
+    return max(1, int(found.group(1))) if found else 5
+
+
+def classify(text):
+    value = normalize(text)
+    hp = get_hp(text)
+    # Death must win over a simultaneous kill of the enemy.
+    if (hp and hp[0] == 0) or any(word in value for word in DEATH_WORDS):
+        return "death", hp
+    if get_energy_wait(text) is not None:
+        return "energy", hp
+    if any(word in value for word in WIN_WORDS):
+        return "victory", hp
+    # A combat-round result that shows the opponent with 0 HP is also a win.
+    if "раунд " in value and "vs" in value:
+        # Look only at HP not preceded by "Ви"; in normal reports the
+        # character's HP comes first and the enemy's HP comes second.
+        all_hp = re.findall(r"\(\s*(\d+)\s*/\s*(\d+)\s*\)", text or "")
+        if len(all_hp) >= 2 and int(all_hp[1][0]) == 0:
+            return "victory", hp
+    if any(word in value for word in BATTLE_WORDS):
+        return "combat", hp
+    return "other", hp
+
+
+def read_state():
+    try:
+        value = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            return value
+    except (OSError, ValueError):
+        pass
+    return {"next_action_at": None, "reason": "", "last_hp": None}
+
+
+def save_state(state):
+    STATE_PATH.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def pause(state, minutes, reason, message_id=None, hp=None):
+    state["next_action_at"] = (utc_now() + timedelta(minutes=minutes)).isoformat()
+    state["reason"] = reason
+    state["last_hp"] = hp
+    state["pause_message_id"] = message_id
+    save_state(state)
+    LOG.info("Pause: %s minute(s), reason=%s", minutes, reason)
+
+
+def keyboard_texts(message):
+    return [button.text for row in (message.buttons or []) for button in row]
+
+
+def find_button(messages, fragment):
+    # Newest keyboard containing the desired option, if available.
+    for message in messages:
+        for text in keyboard_texts(message):
+            if fragment in normalize(text):
+                return message, text
+    return None, None
+
+
+def reply_text_from_history(messages, fragment, fallback):
+    # An earlier user click on a Telegram reply keyboard is an outgoing message.
+    for message in messages:
+        if message.out and fragment in normalize(message.raw_text):
+            return message.raw_text
+    return fallback
+
+
+def incoming_signature(messages):
+    """Ignore outgoing messages: sending a command is NOT a bot response."""
+    return tuple(
+        (message.id,
+         str(message.edit_date) if message.edit_date else "",
+         message.raw_text or "",
+         tuple(keyboard_texts(message)))
+        for message in messages if not message.out
+    )
+
+
+async def messages_from_bot(client, bot):
+    return await client.get_messages(bot, limit=35)
+
+
+async def wait_for_bot_response(client, bot, signature):
+    deadline = time.monotonic() + RESPONSE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(1.5)
+        messages = await messages_from_bot(client, bot)
+        if incoming_signature(messages) != signature:
+            # Allow multiple bot messages from one game action to arrive.
+            await asyncio.sleep(1)
+            return True
+    return False
+
+
+async def take_action(client, bot, messages, fragment, fallback):
+    reply_msg, reply_label = find_button(messages, fragment)
+    if reply_msg:
+        LOG.info("Button: %s", reply_label)
         await reply_msg.click(text=reply_label)
         return reply_label
 
